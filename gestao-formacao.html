@@ -2956,6 +2956,16 @@ const MUDANCAS = {
   }
 };
 
+// Os três blocos de Definições: qualquer Guardar grava também os outros que tenham alterações, para nada se perder no render seguinte.
+const DEFINICOES = { perfil: 'os teus dados', valores: 'os valores', checklist: 'a lista de tarefas' };
+function formAlterado(f) {   // mudou algum campo desde que o formulário foi desenhado?
+  return [...f.elements].some(el => {
+    if (el.tagName === 'SELECT') { const ini = [...el.options].find(o => o.defaultSelected) || el.options[0]; return !!ini && el.value !== ini.value; }
+    if (el.type === 'checkbox' || el.type === 'radio') return el.checked !== el.defaultChecked;
+    return 'defaultValue' in el && el.value !== el.defaultValue;
+  });
+}
+
 const FORMULARIOS = {
   perfil: d => { Object.assign(db.perfil, { nome: d.nome.trim(), nif: d.nif.trim(), email: d.email.trim(), telefone: d.telefone.trim(), tema: d.tema }); aviso('Dados guardados'); },
   valores: d => { Object.assign(db.perfil, { valor_hora_padrao: Number(d.valor_hora_padrao) || 0, prazo_pagamento_padrao: Number(d.prazo_pagamento_padrao) || 0, iva_regime: d.iva_regime, iva_taxa: Number(d.iva_taxa) || 0, iva_motivo: d.iva_motivo.trim(), retencao_taxa: Number(d.retencao_taxa) || 0, dias_aviso_documentos: Number(d.dias_aviso_documentos) || 30, fiscal_confirmado: true }); aviso('Valores guardados'); },
@@ -3013,6 +3023,12 @@ document.addEventListener('submit', e => {
   e.preventDefault();
   const r = FORMULARIOS[f.dataset.form](Object.fromEntries(new FormData(f)), f);
   if (typeof r === 'string') { aviso(r); return; }
+  if (DEFINICOES[f.dataset.form]) {
+    const outros = [...document.querySelectorAll('form[data-form]')].filter(o => o !== f && DEFINICOES[o.dataset.form] && formAlterado(o));
+    outros.forEach(o => FORMULARIOS[o.dataset.form](Object.fromEntries(new FormData(o)), o));
+    const gravados = Object.keys(DEFINICOES).filter(k => [f, ...outros].some(o => o.dataset.form === k)).map(k => DEFINICOES[k]);
+    if (outros.length) aviso(`Ficou tudo guardado: ${gravados.join(', ').replace(/, ([^,]*)$/, ' e $1')}.`);
+  }
   guardar();
   if (r && r.ir) ir(r.ir); else render();
 });
