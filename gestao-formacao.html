@@ -732,7 +732,7 @@ function normalizar(d) {
    são as regras de acesso do esquema (cada pessoa só vê o que é seu).
    A app continua a trabalhar sobre o objeto db: guardar() compara-o com o que já
    foi gravado e envia só as diferenças. */
-const SUPABASE = { url: '', chave: '', ...(globalThis.GESTAO_SUPABASE || {}) };
+const SUPABASE = { url: 'https://djzmqnsubxchtifryzcn.supabase.co', chave: 'sb_publishable_-k_fW5fRGlvI0Nn_vcBg7A_zRZLPqbd', ...(globalThis.GESTAO_SUPABASE || {}) };
 const REMOTO = !!(SUPABASE.url && SUPABASE.chave);
 const SUPABASE_JS = ['https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js', 'sha384-Rj26LVGvoeRVR6+mwQmFfcR3QOBEwT+ZmuCWpuiqeTzJpCs0ER4ITAWGb4Hiy3Ok'];
 let sb = null, sessao = null;
