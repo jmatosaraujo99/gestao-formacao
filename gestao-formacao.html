@@ -745,7 +745,7 @@ const COLUNAS_BD = {
   entidades: 'id:id nome nif tipo contacto_nome email telefone dominio_email cor:n prazo_pagamento_dias:n checklist_extra:l notas',
   formacoes: 'id:id entidade_id:id designacao referencial:e codigo codigo_acao turma local modalidade:e horas_previstas:n valor_hora:n estado:e prazo_resposta:d coordenador_nome coordenador_contacto coformadores:l notas pedido_id:id criado_em:m',
   pedidos: 'id:id origem:e mensagem_id:tn recebido_em:m remetente assunto corpo tipo:e resumo confianca:e duvidas:l dados:j estado:e formacao_id:id formacao_sugerida:id',
-  sessoes: 'id:id formacao_id:id data:d inicio:h fim:h formador local estado:e sumario_entregue:b notas calendario_evento_id:tn',
+  sessoes: 'id:id formacao_id:id data:d inicio:h fim:h formador local estado:e sumario_entregue:b notas',   // o evento de calendário é da sincronização, não da app
   checklist: 'id:id formacao_id:id fase:e titulo estado:e data:d notas ordem:n',
   recibos: 'id:id formacao_id:id numero data_emissao:d horas:n valor_bruto:n iva_taxa:n retencao_taxa:n data_prevista_pagamento:d data_pagamento:d notas',
   documentos: 'id:id titulo data_emissao:d data_validade:d onde_esta notas',
@@ -829,6 +829,18 @@ async function lerTudo() {
   gravado = { perfil: perfis[0] ? JSON.stringify(paraBd('perfil', novo.perfil, CAMPOS_PERFIL)) : null };
   for (const t of TABELAS_BD) gravado[t.col] = new Map(novo[t.col].map(x => [x[t.chave], JSON.stringify(linhaBd(t, x))]));
   db = novo;
+  // Ligações ao calendário e ao email (só se leem: quem as escreve é a sincronização)
+  try { ligacoesBd = await pedir(sb.from('integracoes').select('servico,conta,ativo,ultima_sincronizacao,ultimo_erro')); } catch (e) { ligacoesBd = []; }
+}
+let ligacoesBd = [];
+function blocoCalendarioHtml() {
+  const c = ligacoesBd.find(x => x.servico === 'google_calendar' && x.ativo);
+  const quando = c && c.ultima_sincronizacao ? momentoLocal(c.ultima_sincronizacao) : null;
+  const estado = !c ? '<p class="txt-sec">Ainda não está ligado. Quando estiver, as tuas sessões vão sozinhas para um calendário «Formações» na tua conta Google, de 15 em 15 minutos.</p>'
+    : `<p class="txt-sec">Ligado ao Google Calendar, no calendário <strong>«Formações»</strong>${c.conta ? ` (${esc(c.conta)})` : ''}. ${quando ? `Última sincronização: <strong>${fmtData(quando.slice(0, 10))}, às ${quando.slice(11, 16)}</strong>.` : '<strong>Ainda não sincronizou.</strong>'}</p>
+       <p class="txt-sec">As mudanças feitas no calendário não mudam a app: chegam à Caixa de entrada para confirmares.</p>
+       ${c.ultimo_erro ? `<div class="faixa" role="alert"><span><strong>Último erro:</strong> ${esc(c.ultimo_erro)}</span></div>` : ''}`;
+  return `<section class="bloco"><div class="bloco-cab"><h2>Calendário</h2></div>${estado}</section>`;
 }
 
 // Há alterações por gravar?
@@ -2506,7 +2518,7 @@ function vDefinicoes() {
     </div><div class="bloco-acoes"><button class="btn btn-prim" type="submit">Guardar</button></div></form>
     ${REMOTO && sessao ? `<section class="bloco"><div class="bloco-cab"><h2>Conta</h2></div>
       <p class="txt-sec">Entraste como <strong>${esc(sessao.user.email || '')}</strong>. Os dados ficam guardados na tua conta, iguais em todos os aparelhos onde entrares.</p>
-      <div class="dados-acoes"><button class="btn" data-acao="sair">Sair da conta</button></div></section>` : ''}
+      <div class="dados-acoes"><button class="btn" data-acao="sair">Sair da conta</button></div></section>${blocoCalendarioHtml()}` : ''}
     <section class="bloco"><div class="bloco-cab"><h2>Cópias e exportações</h2></div>
       <p class="txt-sec">${REMOTO ? 'A base de dados faz cópias de segurança sozinha. Podes também exportar uma cópia tua, para guardares onde quiseres.' : `Nesta versão os dados ficam só neste navegador. Exporta uma cópia de vez em quando e guarda-a fora deste computador. Última cópia: <strong>${db.local.ultima_copia ? fmtData(db.local.ultima_copia) : 'ainda nenhuma'}</strong>.`}</p>
       <div class="dados-acoes">
