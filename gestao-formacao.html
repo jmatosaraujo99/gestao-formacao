@@ -19,8 +19,10 @@
   pedidos que chegam por email.
 
   Como funciona nesta versão:
-  - Abre-se no navegador, sem instalar nada. Os dados ficam guardados no próprio
-    navegador (localStorage). Exporta uma cópia em Definições para não perder nada.
+  - Abre-se no navegador, sem instalar nada. Sem configuração, os dados ficam
+    guardados no próprio navegador (localStorage); exporta cópias em Definições.
+  - Com o Supabase configurado (const SUPABASE, fase 2), pede a entrada com email
+    e palavra-passe e os dados vivem na conta, iguais em todos os aparelhos.
   - Os pedidos entram colando o texto do email (leitura por padrões) ou o JSON
     gerado por um assistente de IA (formato em integracao/pedido.schema.json).
   - O calendário exporta-se em .ics (Google Calendar, Outlook, Apple).
