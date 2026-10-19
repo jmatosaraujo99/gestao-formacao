@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#1D3B33">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Formação">
+<link rel="apple-touch-icon" href="icone-180.png">
 <title>Gestão de Formação</title>
 <!--
   GESTÃO DE FORMAÇÃO — protótipo funcional (versão local, um só ficheiro)
@@ -537,6 +542,15 @@ dialog::backdrop{background:rgba(12,16,28,.48)}
   #aviso{bottom:86px}
 }
 @media (prefers-reduced-motion: reduce){ *{transition:none !important} }
+/* Entrar na conta (só com o Supabase) */
+.sem-conta .lateral{display:none}
+.sem-conta .app{grid-template-columns:minmax(0,1fr)}
+.entrar{max-width:440px;margin:7vh auto 0;padding:0 16px}
+.entrar-marca{display:flex;align-items:center;gap:10px;font-weight:700;margin-bottom:18px}
+.entrar h1{margin-bottom:8px}
+.entrar .txt-sec{margin-bottom:14px}
+.entrar .bloco-acoes{flex-wrap:wrap;align-items:center}
+.entrar-msg{margin:14px 0 0}
 </style>
 </head>
 <body>
@@ -689,6 +703,7 @@ function carregar() {
 }
 function guardar() {
   cache.clear();
+  if (REMOTO) { if (db && sessao) sincronizar(); return; }
   try { localStorage.setItem(CHAVE, JSON.stringify(db)); armazenamentoOk = true; }
   catch (e) { armazenamentoOk = false; }
 }
@@ -708,6 +723,361 @@ function normalizar(d) {
   return o;
 }
 
+/* ---------- Base de dados no Supabase (fase 2) ----------
+   Com o endereço e a chave do projeto preenchidos, os dados vivem no Supabase e
+   pede-se a entrada com email e palavra-passe. Vazios, a app funciona como antes,
+   só neste navegador. A chave "anon" é pública por natureza: quem protege os dados
+   são as regras de acesso do esquema (cada pessoa só vê o que é seu).
+   A app continua a trabalhar sobre o objeto db: guardar() compara-o com o que já
+   foi gravado e envia só as diferenças. */
+const SUPABASE = { url: '', chave: '', ...(globalThis.GESTAO_SUPABASE || {}) };
+const REMOTO = !!(SUPABASE.url && SUPABASE.chave);
+const SUPABASE_JS = ['https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js', 'sha384-Rj26LVGvoeRVR6+mwQmFfcR3QOBEwT+ZmuCWpuiqeTzJpCs0ER4ITAWGb4Hiy3Ok'];
+let sb = null, sessao = null;
+const ligacao = { estado: 'ok', erro: '', falhas: [] };   // ok | a-gravar | sem-rede | erro
+
+// Colunas gravadas de cada tabela, com o tipo: id, n(úmero), d(ata), h(ora), m(omento), b(oolean), l(ista), j(son), e(scolha), tn (texto ou nulo). Sem tipo = texto.
+const COLUNAS_BD = {
+  perfil: 'nome nif email telefone valor_hora_padrao:n prazo_pagamento_padrao:n dias_aviso_documentos:n iva_regime:e iva_taxa:n iva_motivo retencao_taxa:n fiscal_confirmado:b tema:e checklist_padrao:j',
+  entidades: 'id:id nome nif tipo contacto_nome email telefone dominio_email cor:n prazo_pagamento_dias:n checklist_extra:l notas',
+  formacoes: 'id:id entidade_id:id designacao referencial:e codigo codigo_acao turma local modalidade:e horas_previstas:n valor_hora:n estado:e prazo_resposta:d coordenador_nome coordenador_contacto coformadores:l notas pedido_id:id criado_em:m',
+  pedidos: 'id:id origem:e mensagem_id:tn recebido_em:m remetente assunto corpo tipo:e resumo confianca:e duvidas:l dados:j estado:e formacao_id:id formacao_sugerida:id',
+  sessoes: 'id:id formacao_id:id data:d inicio:h fim:h formador local estado:e sumario_entregue:b notas calendario_evento_id:tn',
+  checklist: 'id:id formacao_id:id fase:e titulo estado:e data:d notas ordem:n',
+  recibos: 'id:id formacao_id:id numero data_emissao:d horas:n valor_bruto:n iva_taxa:n retencao_taxa:n data_prevista_pagamento:d data_pagamento:d notas',
+  documentos: 'id:id titulo data_emissao:d data_validade:d onde_esta notas',
+  historico: 'id:id formacao_id:id quando:m texto origem:e',
+  adiados: 'chave volta_em:d titulo criado_em:m'
+};
+const ESCOLHAS_BD = {   // valores aceites pela base de dados e o valor por defeito
+  iva_regime: [['isento', 'taxa'], 'isento'], tema: [['auto', 'claro', 'escuro'], 'auto'],
+  referencial: [['UFCD', 'UC', 'Curso livre', 'Outro'], 'Curso livre'], modalidade: [['presencial', 'online', 'b-learning'], 'presencial'],
+  tipo: [['novo_pedido', 'alteracao', 'cancelamento', 'documentos', 'pagamento', 'outro'], 'outro'], confianca: [['alta', 'media', 'baixa'], 'media'],
+  fase: [['contratacao', 'execucao', 'fecho'], 'contratacao']
+};
+const ESTADOS_BD = { formacoes: ['pedido', 'proposta', 'confirmada', 'recusada', 'cancelada'], pedidos: ['novo', 'convertido', 'descartado'], sessoes: ['prevista', 'realizada', 'cancelada'], checklist: ['pendente', 'feito', 'nao_aplica'] };
+const ORIGENS_BD = { pedidos: ['email', 'calendario', 'assistente', 'manual'], historico: ['app', 'sincronizacao', 'sistema'] };
+// Ordem de gravação (quem é apontado primeiro) e para onde aponta cada tabela
+const TABELAS_BD = [
+  { col: 'entidades' },
+  { col: 'formacoes', fk: { entidade_id: 'entidades', pedido_id: 'pedidos' } },
+  { col: 'pedidos', fk: { formacao_id: 'formacoes', formacao_sugerida: 'formacoes' }, ordem: [['recebido_em', false]] },
+  { col: 'sessoes', fk: { formacao_id: 'formacoes' }, obrig: 'formacao_id', ordem: [['data', true], ['inicio', true]] },
+  { col: 'checklist', fk: { formacao_id: 'formacoes' }, obrig: 'formacao_id', ordem: [['ordem', true], ['criado_em', true]] },
+  { col: 'recibos', fk: { formacao_id: 'formacoes' }, obrig: 'formacao_id' },
+  { col: 'documentos' },
+  { col: 'historico', fk: { formacao_id: 'formacoes' }, ordem: [['quando', false]] },
+  { col: 'adiados', tab: 'avisos_adiados', chave: 'chave' }
+].map(t => ({ tab: t.col, chave: 'id', ordem: [['criado_em', true]], ...t, campos: COLUNAS_BD[t.col].split(' ').map(c => c.split(':')) }));
+const CAMPOS_PERFIL = COLUNAS_BD.perfil.split(' ').map(c => c.split(':'));
+
+// Momentos: na app em hora local ('2026-10-19T10:00:00'), na base de dados com fuso
+const momentoLocal = v => { const d = new Date(v); return isNaN(d) ? null : `${isoDe(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+const momentoBd = v => { if (!v) return null; const d = new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(v) ? v : String(v).slice(0, 19)); return isNaN(d) ? null : d.toISOString(); };
+function escolhaBd(col, campo, v) {
+  const [opcoes, padrao] = campo === 'estado' ? [ESTADOS_BD[col], ESTADOS_BD[col][0]] : campo === 'origem' ? [ORIGENS_BD[col], ORIGENS_BD[col][0]] : ESCOLHAS_BD[campo];
+  return opcoes.includes(v) ? v : padrao;
+}
+// Um registo da app no formato da base de dados
+function paraBd(col, x, campos) {
+  const o = {};
+  for (const [c, t] of campos) {
+    const v = x[c];
+    o[c] = t === 'id' || t === 'tn' ? (v || null) : t === 'n' ? (Number(v) || 0) : t === 'd' ? (dataValida(String(v || '')) ? v : null)
+      : t === 'h' ? String(v || '00:00').slice(0, 5) : t === 'm' ? momentoBd(v) : t === 'b' ? !!v : t === 'l' ? (Array.isArray(v) ? v.map(String) : [])
+      : t === 'j' ? (v && typeof v === 'object' ? v : {}) : t === 'e' ? escolhaBd(col, c, v) : String(v ?? '');
+  }
+  return o;
+}
+// Um registo da base de dados no formato da app
+function daBd(campos, r) {
+  const o = {};
+  for (const [c, t] of campos) {
+    const v = r[c];
+    o[c] = t === 'h' ? String(v || '').slice(0, 5) : t === 'm' ? (v ? momentoLocal(v) : null) : t === 'n' ? Number(v) || 0
+      : (t === 'id' || t === 'tn' || t === 'd') ? (v ?? null) : t === 'l' ? (v || []) : t === 'j' ? (v || {}) : t === 'b' ? !!v : (v ?? '');
+  }
+  return o;
+}
+
+// O que já está gravado: por tabela, chave -> registo como foi enviado (JSON)
+let gravado = null;
+const tabelaBd = col => TABELAS_BD.find(t => t.col === col);
+const linhaBd = (t, x) => paraBd(t.col, x, t.campos);
+async function pedir(q) { const { data, error } = await q; if (error) throw error; return data; }
+const erroDeRede = e => navigator.onLine === false || /Failed to fetch|NetworkError|Load failed|fetch failed|network|timeout/i.test(String(e && (e.message || e)));
+
+async function lerTabela(t) {
+  const out = [];
+  for (let i = 0; ; i += 1000) {
+    let q = sb.from(t.tab).select('*');
+    for (const [c, asc] of [...t.ordem, [t.chave, true]]) q = q.order(c, { ascending: asc });
+    const linhas = await pedir(q.range(i, i + 999));
+    out.push(...linhas);
+    if (linhas.length < 1000) return out;
+  }
+}
+async function lerTudo() {
+  const [perfis, ...tabelas] = await Promise.all([pedir(sb.from('perfil').select('*')), ...TABELAS_BD.map(t => lerTabela(t))]);
+  const o = { perfil: perfis[0] ? daBd(CAMPOS_PERFIL, perfis[0]) : { email: sessao.user.email || '' } };
+  TABELAS_BD.forEach((t, i) => { o[t.col] = tabelas[i].map(r => daBd(t.campos, r)); });
+  const novo = normalizar(o);
+  novo.local = db && db.local ? db.local : novo.local;
+  gravado = { perfil: perfis[0] ? JSON.stringify(paraBd('perfil', novo.perfil, CAMPOS_PERFIL)) : null };
+  for (const t of TABELAS_BD) gravado[t.col] = new Map(novo[t.col].map(x => [x[t.chave], JSON.stringify(linhaBd(t, x))]));
+  db = novo;
+}
+
+// Há alterações por gravar?
+function porGravar() {
+  if (!db || !gravado) return 0;
+  let n = JSON.stringify(paraBd('perfil', db.perfil, CAMPOS_PERFIL)) !== gravado.perfil ? 1 : 0;
+  for (const t of TABELAS_BD) {
+    const atuais = new Set();
+    for (const x of db[t.col]) { atuais.add(x[t.chave]); if (gravado[t.col].get(x[t.chave]) !== JSON.stringify(linhaBd(t, x))) n++; }
+    for (const k of gravado[t.col].keys()) if (!atuais.has(k)) n++;
+  }
+  return n;
+}
+
+let sincronizacao = null, outraVez = false, modoImportacao = false, tentarDeNovo = null;
+function sincronizar() {
+  if (sincronizacao) { outraVez = true; return sincronizacao; }
+  clearTimeout(tentarDeNovo);
+  mostrarLigacao('a-gravar');
+  sincronizacao = (async () => {
+    try {
+      do { outraVez = false; await enviarMudancas(); } while (outraVez);
+      modoImportacao = false;
+      mostrarLigacao(ligacao.falhas.length ? 'erro' : 'ok');
+    } catch (e) {
+      console.warn('Gravação no Supabase falhou', e);
+      if (erroDeRede(e)) { mostrarLigacao('sem-rede'); tentarDeNovo = setTimeout(sincronizar, 15000); }
+      else mostrarLigacao('erro', String(e.message || e));
+    } finally { sincronizacao = null; }
+    if (recargaPendente) pedirRecarga();
+  })();
+  return sincronizacao;
+}
+
+async function enviarMudancas() {
+  const uidBd = sessao.user.id;
+  ligacao.falhas = [];
+  // Perfil (uma linha, criada quando a conta foi criada)
+  const p = paraBd('perfil', db.perfil, CAMPOS_PERFIL), ps = JSON.stringify(p);
+  if (ps !== gravado.perfil) { await pedir(sb.from('perfil').upsert({ user_id: uidBd, ...p }, { onConflict: 'user_id' })); gravado.perfil = ps; }
+
+  // Apagar o que saiu (primeiro o que aponta para outros registos)
+  for (const t of [...TABELAS_BD].reverse()) {
+    const atuais = new Set(db[t.col].map(x => x[t.chave]));
+    const sair = [...gravado[t.col].keys()].filter(k => !atuais.has(k));
+    for (let i = 0; i < sair.length; i += 200) {
+      const parte = sair.slice(i, i + 200);
+      await pedir(sb.from(t.tab).delete().in(t.chave, parte));
+      parte.forEach(k => gravado[t.col].delete(k));
+    }
+  }
+
+  // Gravar o que é novo ou mudou. Um registo que aponta para outro ainda por gravar
+  // vai primeiro sem essa ligação e é completado na volta seguinte.
+  for (let volta = 0; volta < 3; volta++) {
+    let falta = false;
+    for (const t of TABELAS_BD) {
+      const existe = {};
+      for (const alvo of Object.values(t.fk || {})) existe[alvo] ||= new Set(db[alvo].map(x => x.id));
+      if (t.col === 'checklist') for (const x of db.checklist) if (x.ordem == null) x.ordem = 1 + Math.max(-1, ...db.checklist.filter(c => c.formacao_id === x.formacao_id && c.ordem != null).map(c => c.ordem));
+      const enviar = [];
+      for (const x of db[t.col]) {
+        for (const [c, tipo] of t.campos) if (tipo === 'm' && !x[c]) x[c] = agoraLocal();   // na base de dados os momentos são obrigatórios
+        const l = linhaBd(t, x);
+        let saltar = false;
+        for (const [campo, alvo] of Object.entries(t.fk || {})) {
+          if (!l[campo]) continue;
+          if (!existe[alvo].has(l[campo])) { if (campo === t.obrig) saltar = true; else x[campo] = l[campo] = null; }   // aponta para algo que já não existe
+          else if (!gravado[alvo].has(l[campo])) { falta = true; if (campo === t.obrig) saltar = true; else l[campo] = null; }
+        }
+        if (saltar) continue;
+        const s = JSON.stringify(l);
+        if (gravado[t.col].get(l[t.chave]) !== s) enviar.push([l, s]);
+      }
+      if (!enviar.length) continue;
+      const antes = new Map(enviar.map(([l]) => [l[t.chave], gravado[t.col].get(l[t.chave])]));
+      await gravarLinhas(t, enviar, uidBd);
+      if (t.col === 'formacoes') {
+        const novas = [], mudouEstado = [];
+        for (const [l] of enviar) {
+          if (!gravado.formacoes.has(l.id)) continue;   // não ficou gravada
+          const a = antes.get(l.id);
+          if (!a) novas.push(l.id); else if (JSON.parse(a).estado !== l.estado) mudouEstado.push(l.id);
+        }
+        await efeitosDosGatilhos(novas, mudouEstado);
+      }
+    }
+    if (!falta) break;
+  }
+  if (ligacao.falhas.length) throw new Error(ligacao.falhas[0]);
+}
+
+// Grava várias linhas de uma vez; se a base de dados recusar, tenta uma a uma para isolar a que falha
+async function gravarLinhas(t, enviar, uidBd) {
+  const conflito = t.chave === 'chave' ? 'user_id,chave' : 'id';
+  const com = l => ({ user_id: uidBd, ...l });
+  try {
+    for (let i = 0; i < enviar.length; i += 200) {
+      const parte = enviar.slice(i, i + 200);
+      await pedir(sb.from(t.tab).upsert(parte.map(([l]) => com(l)), { onConflict: conflito }));
+      parte.forEach(([l, s]) => gravado[t.col].set(l[t.chave], s));
+    }
+  } catch (e) {
+    if (erroDeRede(e)) throw e;
+    for (const [l, s] of enviar) {
+      if (gravado[t.col].get(l[t.chave]) === s) continue;
+      try { await pedir(sb.from(t.tab).upsert(com(l), { onConflict: conflito })); gravado[t.col].set(l[t.chave], s); }
+      catch (e2) { if (erroDeRede(e2)) throw e2; ligacao.falhas.push(explicarErroBd(t.col, l, e2)); }
+    }
+  }
+}
+function explicarErroBd(col, l, e) {
+  const m = String(e.message || e);
+  const o = { formacoes: l.designacao, sessoes: l.data && fmtData(l.data), checklist: l.titulo, recibos: l.numero, entidades: l.nome, documentos: l.titulo, pedidos: l.assunto }[col] || '';
+  if (/checklist_unico/.test(m)) return `A tarefa "${l.titulo}" está repetida nesta formação.`;
+  if (/recibo_pago_tem_emissao/.test(m)) return `O recibo ${l.numero || ''} tem pagamento mas não tem data de emissão.`;
+  if (/sessao_fim_depois_inicio/.test(m)) return `A sessão de ${fmtData(l.data)} acaba antes de começar.`;
+  return `Não foi possível gravar ${o ? `"${o}"` : 'um registo'} (${m}).`;
+}
+
+// A base de dados cria sozinha a lista de tarefas e o histórico de cada formação nova
+// e regista as mudanças de estado. Aqui, a app adota esses registos em vez de os duplicar.
+const normTitulo = s => String(s || '').trim().toLowerCase();
+async function efeitosDosGatilhos(novas, mudouEstado) {
+  const t = tabelaBd('checklist'), th = tabelaBd('historico');
+  if (novas.length) {
+    const criadas = await pedir(sb.from('checklist').select('*').in('formacao_id', novas));
+    const sobram = [];
+    for (const r of criadas) {
+      const c = db.checklist.find(x => x.formacao_id === r.formacao_id && x.fase === r.fase && normTitulo(x.titulo) === normTitulo(r.titulo) && !gravado.checklist.has(x.id));
+      if (!c) { sobram.push(r.id); continue; }   // a app é que manda: o que ela não tem, sai
+      c.id = r.id; c.ordem = r.ordem;
+      gravado.checklist.set(r.id, JSON.stringify(linhaBd(t, daBd(t.campos, r))));
+    }
+    if (sobram.length) await pedir(sb.from('checklist').delete().in('id', sobram));
+  }
+  const afetadas = [...novas, ...mudouEstado];
+  if (!afetadas.length) return;
+  const conhecidos = new Set(db.historico.map(h => h.id));
+  const novos = (await pedir(sb.from('historico').select('*').in('formacao_id', afetadas).eq('origem', 'sistema'))).filter(r => !conhecidos.has(r.id) && !gravado.historico.has(r.id));
+  if (!novos.length) return;
+  if (modoImportacao) { await pedir(sb.from('historico').delete().in('id', novos.map(r => r.id))); return; }   // a cópia já traz o seu histórico
+  for (const r of novos) {
+    const h = daBd(th.campos, r);
+    db.historico.push(h);
+    gravado.historico.set(h.id, JSON.stringify(linhaBd(th, h)));
+  }
+  db.historico.sort((a, b) => String(b.quando).localeCompare(String(a.quando)));
+}
+
+// Uma cópia antiga pode ter identificadores curtos ("f_ab12"); a base de dados usa UUID.
+const RE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function idsParaUuid(o) {
+  const mapa = new Map();
+  const novo = v => { if (!v) return v; if (!mapa.has(v)) mapa.set(v, RE_UUID.test(v) ? v : crypto.randomUUID()); return mapa.get(v); };
+  for (const k of ['entidades', 'formacoes', 'sessoes', 'checklist', 'recibos', 'documentos', 'pedidos', 'historico']) for (const x of (o[k] || [])) x.id = novo(x.id);
+  for (const f of o.formacoes || []) { f.entidade_id = mapa.get(f.entidade_id) || null; f.pedido_id = mapa.get(f.pedido_id) || null; }
+  for (const k of ['sessoes', 'checklist', 'recibos', 'historico']) for (const x of (o[k] || [])) x.formacao_id = mapa.get(x.formacao_id) || null;
+  for (const p of o.pedidos || []) { p.formacao_id = mapa.get(p.formacao_id) || null; p.formacao_sugerida = mapa.get(p.formacao_sugerida) || null; }
+  o.adiados = (o.adiados || []).filter(a => a && typeof a.chave === 'string').map(a => {
+    const [tipo, ...ids] = a.chave.split(':');
+    const novos = ids.map(x => mapa.get(x));
+    return novos.every(Boolean) ? { ...a, chave: [tipo, ...(tipo === 'conflito' ? novos.sort() : novos)].join(':') } : null;
+  }).filter(Boolean);
+  return o;
+}
+
+// Mudanças feitas noutro aparelho (ou pela sincronização do email) chegam pelo Supabase Realtime
+let recargaPendente = false, temporizadorRecarga = null;
+function aoMudarNaBd(col, ev) {
+  if (!gravado) return;
+  const t = tabelaBd(col);
+  if (col === 'perfil') { if (ev.new && JSON.stringify(paraBd('perfil', daBd(CAMPOS_PERFIL, ev.new), CAMPOS_PERFIL)) === gravado.perfil) return; }
+  else if (ev.eventType === 'DELETE') { const k = ev.old && ev.old[t.chave]; if (k && !gravado[col].has(k)) return; }
+  else if (ev.new && gravado[col].get(ev.new[t.chave]) === JSON.stringify(linhaBd(t, daBd(t.campos, ev.new)))) return;   // é o que esta app acabou de gravar
+  pedirRecarga();
+}
+function pedirRecarga() {
+  recargaPendente = true;
+  clearTimeout(temporizadorRecarga);
+  temporizadorRecarga = setTimeout(async () => {
+    // Não mexer nos dados enquanto há gravações por fazer ou um formulário aberto
+    if (sincronizacao || porGravar() || dlg.open) { temporizadorRecarga = setTimeout(pedirRecarga, 1500); return; }
+    recargaPendente = false;
+    try { await lerTudo(); cache.clear(); render(); mostrarLigacao('ok'); }
+    catch (e) { console.warn('Não foi possível atualizar', e); if (erroDeRede(e)) mostrarLigacao('sem-rede'); }
+  }, 700);
+}
+function ouvirMudancas() {
+  const canal = sb.channel('gestao-formacao');
+  for (const [col, tab] of [['perfil', 'perfil'], ...TABELAS_BD.map(t => [t.col, t.tab])]) canal.on('postgres_changes', { event: '*', schema: 'public', table: tab }, ev => aoMudarNaBd(col, ev));
+  canal.subscribe();
+}
+
+function mostrarLigacao(estado, erro = '') {
+  ligacao.estado = estado; ligacao.erro = erro || (ligacao.falhas[0] || '');
+  const pe = document.getElementById('lateral-pe');
+  if (pe && REMOTO && sessao) pe.textContent = estado === 'a-gravar' ? 'A guardar…' : estado === 'sem-rede' ? 'Sem ligação: as alterações ficam por gravar.' : estado === 'erro' ? 'Há alterações que não foram gravadas.' : `Guardado na tua conta (${sessao.user.email}).`;
+  const f = document.getElementById('faixa-ligacao');
+  if (f) f.innerHTML = faixaLigacaoHtml();
+}
+function faixaLigacaoHtml() {
+  if (!REMOTO) return '';
+  if (ligacao.estado === 'sem-rede') return `<div class="faixa" role="alert">Sem ligação à internet. As alterações ficam por gravar e seguem quando a ligação voltar. Não feches a app até lá.</div>`;
+  if (ligacao.estado === 'erro') return `<div class="faixa" role="alert"><span><strong>Algumas alterações não foram gravadas.</strong> ${esc(ligacao.erro)}</span><button class="lig-peq" data-acao="tentarGravar">Tentar outra vez</button></div>`;
+  return '';
+}
+
+function carregarBibliotecaSupabase() {
+  if (globalThis.supabase && supabase.createClient) return Promise.resolve();
+  return new Promise((ok, falha) => {
+    const s = document.createElement('script');
+    s.src = SUPABASE_JS[0]; s.integrity = SUPABASE_JS[1]; s.crossOrigin = 'anonymous';
+    s.onload = ok; s.onerror = () => falha(new Error('Não foi possível carregar a ligação ao Supabase (sem internet?)'));
+    document.head.appendChild(s);
+  });
+}
+async function iniciarRemoto() {
+  render();
+  try {
+    await carregarBibliotecaSupabase();
+    sb = supabase.createClient(SUPABASE.url, SUPABASE.chave, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
+    sb.auth.onAuthStateChange((evento, s) => {
+      if (evento === 'PASSWORD_RECOVERY') ui.novaPalavra = true;
+      const antes = sessao && sessao.user.id;
+      sessao = s;
+      if (!s) { db = null; gravado = null; contaAberta = null; render(); return; }
+      if (s.user.id !== antes) setTimeout(abrirConta);   // fora do aviso do Supabase, como a documentação pede
+      else if (evento === 'PASSWORD_RECOVERY') render();
+    });
+    const { data } = await sb.auth.getSession();
+    if (data.session && !sessao) { sessao = data.session; await abrirConta(); }
+    else render();
+  } catch (e) {
+    console.error(e);
+    ui.erroArranque = String(e.message || e);
+    render();
+  }
+}
+let contaAberta = null;
+async function abrirConta() {
+  if (contaAberta === sessao.user.id && db) return;
+  contaAberta = sessao.user.id;
+  ui.erroArranque = '';
+  db = null; render();
+  try { await lerTudo(); }
+  catch (e) { console.error(e); contaAberta = null; ui.erroArranque = erroDeRede(e) ? 'Sem ligação à internet. Tenta outra vez quando tiveres rede.' : `Não foi possível ler os teus dados (${e.message || e}).`; render(); return; }
+  if (!ouvirMudancas.feito) { ouvirMudancas(); ouvirMudancas.feito = true; }
+  render(); mostrarLigacao('ok');
+  if (porGravar()) sincronizar();
+}
+
 const ent = id => db.entidades.find(e => e.id === id);
 const form = id => db.formacoes.find(f => f.id === id);
 const sessoesDe = fid => db.sessoes.filter(s => s.formacao_id === fid).sort(ordSessao);
@@ -719,7 +1089,7 @@ const entidadePorNome = n => { const s = String(n || '').trim().toLowerCase(); r
 
 function registar(texto, formacao_id = null) {
   db.historico.unshift({ id: uid('h'), quando: agoraLocal(), texto, formacao_id });
-  if (db.historico.length > 600) db.historico.length = 600;
+  if (!REMOTO && db.historico.length > 600) db.historico.length = 600;   // no Supabase o histórico fica todo
 }
 
 function criarEntidade(o) {
@@ -756,7 +1126,7 @@ function criarFormacao(dados, extrasChecklist = []) {
   };
   db.formacoes.push(f);
   db.checklist.push(...checklistInicial(f.id, db.perfil, ent(f.entidade_id), extrasChecklist));
-  registar('Formação criada', f.id);
+  if (!REMOTO) registar('Formação criada', f.id);   // no Supabase quem regista é a base de dados
   return f;
 }
 
@@ -1504,6 +1874,16 @@ let ultimaRota = null;
 function render() {
   const foco = seletorFoco(document.activeElement), y = window.scrollY, mesmaRota = ultimaRota === location.hash;
   cache.clear();
+  document.body.classList.toggle('sem-conta', REMOTO && !db);
+  if (REMOTO && (!db || ui.novaPalavra)) {   // entrada na conta (ou dados ainda a chegar)
+    document.getElementById('conteudo').innerHTML = vEntrar();
+    document.getElementById('nav').innerHTML = '';
+    document.title = 'Entrar · Gestão de Formação';
+    const primeiro = document.querySelector('#conteudo input');
+    if (primeiro && !document.activeElement?.matches?.('#conteudo input, #conteudo button')) primeiro.focus();
+    ultimaRota = null;
+    return;
+  }
   nCampo = 0;
   aplicarTema();
   const r = rota();
@@ -1511,9 +1891,10 @@ function render() {
   try { html = ROTAS[r.nome](r.id); }
   catch (e) { console.error(e); html = vazio('Algo correu mal ao mostrar esta página.', String(e.message || e), '<a class="btn" href="#/painel">Voltar ao painel</a>'); }
   const faixaArmazenamento = armazenamentoOk ? '' : `<div class="faixa" role="alert">Este navegador não está a guardar os dados. Exporta uma cópia em Definições antes de fechar a página.</div>`;
-  document.getElementById('conteudo').innerHTML = faixaArmazenamento + html;
+  document.getElementById('conteudo').innerHTML = faixaArmazenamento + `<div id="faixa-ligacao">${faixaLigacaoHtml()}</div>` + html;
   document.getElementById('nav').innerHTML = navHtml(r.nome);
-  document.getElementById('lateral-pe').textContent = 'Dados guardados neste navegador. Exporta cópias em Definições.';
+  if (REMOTO) mostrarLigacao(ligacao.estado, ligacao.erro);
+  else document.getElementById('lateral-pe').textContent = 'Dados guardados neste navegador. Exporta cópias em Definições.';
   document.title = `${TITULOS[r.nome]} · Gestão de Formação`;
   ligarGrafico();
   if (mesmaRota) {
@@ -1535,7 +1916,7 @@ function ir(hash) {
 
 /* ---------- Vista: Painel ---------- */
 function diasSemCopia() { return difDias(db.local.ultima_copia || db.local.criado_em || hoje(), hoje()); }
-const precisaCopia = () => db.formacoes.length > 0 && diasSemCopia() >= 7 && !(db.local.lembrar_copia_depois && db.local.lembrar_copia_depois > hoje());
+const precisaCopia = () => !REMOTO && db.formacoes.length > 0 && diasSemCopia() >= 7 && !(db.local.lembrar_copia_depois && db.local.lembrar_copia_depois > hoje());
 function alertaHtml(a) {
   return `<li class="alerta ${a.adiado ? 'adiado' : ''}"><a class="alerta-lig" href="${a.link}"><span class="alerta-tit">${esc(a.titulo)}</span>${a.detalhe ? `<span class="alerta-det">${esc(a.detalhe)}</span>` : ''}</a>
     <div class="alerta-lado">${a.adiado
@@ -2066,6 +2447,38 @@ function vEntidades() {
 }
 
 /* ---------- Vista: Definições ---------- */
+/* ---------- Vista: Entrar (só com o Supabase) ---------- */
+function vEntrar() {
+  nCampo = 0;
+  const marca = `<div class="entrar-marca"><span class="marca-sinal" aria-hidden="true">F</span>Gestão de Formação</div>`;
+  const msg = t => `<div class="entrar">${marca}<p class="txt-sec" role="status">${t}</p></div>`;
+  if (ui.erroArranque) return `<div class="entrar">${marca}<section class="bloco"><h1>Não foi possível abrir</h1><p class="txt-sec">${esc(ui.erroArranque)}</p>
+    <div class="bloco-acoes"><button class="btn btn-prim" data-acao="recarregarPagina">Tentar outra vez</button>${sessao ? `<button class="lig-peq" data-acao="sair">Sair da conta</button>` : ''}</div></section></div>`;
+  if (!sb) return msg('A abrir…');
+  if (sessao && ui.novaPalavra) return `<div class="entrar">${marca}<section class="bloco"><h1>Nova palavra-passe</h1>
+    <form data-conta="novaPalavra" novalidate><div class="erro-form" role="alert" hidden></div>
+      <input type="email" name="email" value="${esc(sessao.user.email || '')}" autocomplete="username" hidden>
+      <div class="grelha-campos">${campo('Nova palavra-passe', 'palavra', '', { tipo: 'password', auto: 'new-password', obrig: true, col2: true, ajuda: 'Pelo menos 8 carateres.' })}</div>
+      <div class="bloco-acoes"><button class="btn btn-prim" type="submit">Guardar palavra-passe</button></div></form></section></div>`;
+  if (sessao) return msg('A abrir os teus dados…');
+  return `<div class="entrar">${marca}<section class="bloco"><h1>Entrar</h1>
+    <p class="txt-sec">Os teus dados estão guardados na tua conta, iguais no computador e no telemóvel.</p>
+    <form data-conta="entrar" novalidate><div class="erro-form" role="alert" hidden></div>
+      <div class="grelha-campos">${campo('Email', 'email', ui.emailEntrar || '', { tipo: 'email', auto: 'username', obrig: true, col2: true })}${campo('Palavra-passe', 'palavra', '', { tipo: 'password', auto: 'current-password', obrig: true, col2: true })}</div>
+      <div class="bloco-acoes"><button class="btn btn-prim" type="submit">Entrar</button><button type="button" class="lig-peq" data-acao="esqueciPalavra">Esqueci-me da palavra-passe</button></div>
+    </form>${ui.msgEntrar ? `<p class="txt-sec entrar-msg" role="status">${esc(ui.msgEntrar)}</p>` : ''}</section></div>`;
+}
+function erroDeEntrada(e) {
+  const m = String((e && e.message) || e);
+  if (erroDeRede(e)) return 'Sem ligação à internet.';
+  if (/invalid login credentials/i.test(m)) return 'Email ou palavra-passe errados.';
+  if (/email not confirmed/i.test(m)) return 'Ainda falta confirmar o email: abre a mensagem que recebeste do Supabase.';
+  if (/rate limit|too many/i.test(m)) return 'Demasiadas tentativas. Espera uns minutos e tenta outra vez.';
+  if (/different from the old|same password/i.test(m)) return 'A nova palavra-passe tem de ser diferente da anterior.';
+  if (/password/i.test(m)) return 'Essa palavra-passe não serve: usa pelo menos 8 carateres, com letras e números.';
+  return `Não foi possível: ${m}`;
+}
+
 function vDefinicoes() {
   const p = db.perfil;
   return `<header class="cab-pagina"><div><h1>Definições</h1></div></header>
@@ -2088,15 +2501,18 @@ function vDefinicoes() {
     <form class="bloco" data-form="checklist"><div class="bloco-cab"><h2>Lista de tarefas de cada formação</h2></div><p class="txt-sec" style="margin-bottom:14px">Entra em todas as formações novas. Uma tarefa por linha. As entidades podem acrescentar as suas.</p><div class="grelha-campos">
       ${FASES.map(([k, t]) => campoArea(t, k, (p.checklist_padrao[k] || []).join('\n'), { linhas: 5 })).join('')}
     </div><div class="bloco-acoes"><button class="btn btn-prim" type="submit">Guardar</button></div></form>
+    ${REMOTO && sessao ? `<section class="bloco"><div class="bloco-cab"><h2>Conta</h2></div>
+      <p class="txt-sec">Entraste como <strong>${esc(sessao.user.email || '')}</strong>. Os dados ficam guardados na tua conta, iguais em todos os aparelhos onde entrares.</p>
+      <div class="dados-acoes"><button class="btn" data-acao="sair">Sair da conta</button></div></section>` : ''}
     <section class="bloco"><div class="bloco-cab"><h2>Cópias e exportações</h2></div>
-      <p class="txt-sec">Nesta versão os dados ficam só neste navegador. Exporta uma cópia de vez em quando e guarda-a fora deste computador. Última cópia: <strong>${db.local.ultima_copia ? fmtData(db.local.ultima_copia) : 'ainda nenhuma'}</strong>.</p>
+      <p class="txt-sec">${REMOTO ? 'A base de dados faz cópias de segurança sozinha. Podes também exportar uma cópia tua, para guardares onde quiseres.' : `Nesta versão os dados ficam só neste navegador. Exporta uma cópia de vez em quando e guarda-a fora deste computador. Última cópia: <strong>${db.local.ultima_copia ? fmtData(db.local.ultima_copia) : 'ainda nenhuma'}</strong>.`}</p>
       <div class="dados-acoes">
         <button class="btn" data-acao="exportarJSON">${ic('descarregar')} Exportar cópia</button>
         <label class="btn ficheiro-label">${ic('carregar')} Importar cópia ou pedidos<input type="file" accept="application/json,.json" data-mudar="importarFicheiro"></label>
         <button class="btn" data-acao="exportarICS">${ic('cal')} Calendário (.ics)</button>
         <button class="btn" data-acao="exportarCSV">${ic('euro')} Recibos (.csv)</button>
       </div>
-      <div class="dados-acoes"><button class="btn" data-acao="reporExemplo">${ic('repetir')} Repor dados de exemplo</button><button class="btn btn-perigo" data-acao="apagarTudo">${ic('lixo')} Apagar todos os dados</button></div>
+      <div class="dados-acoes">${REMOTO ? '' : `<button class="btn" data-acao="reporExemplo">${ic('repetir')} Repor dados de exemplo</button>`}<button class="btn btn-perigo" data-acao="apagarTudo">${ic('lixo')} Apagar todos os dados</button></div>
     </section>
   </div></div>`;
 }
@@ -2426,6 +2842,7 @@ const ACOES = {
     const inp = document.getElementById('novo-tarefa'), t = inp && inp.value.trim();
     const fase = document.getElementById('novo-fase')?.value || 'contratacao';
     if (!t) { inp && inp.focus(); return; }
+    if (db.checklist.some(c => c.formacao_id === fid && c.fase === fase && normTitulo(c.titulo) === normTitulo(t))) { aviso('Essa tarefa já está na lista'); inp.focus(); return; }
     db.checklist.push({ id: uid('c'), formacao_id: fid, fase, titulo: t, estado: 'pendente', data: null, notas: '' });
     guardar(); render();
     const sel = document.getElementById('novo-fase'); if (sel) sel.value = fase;
@@ -2478,12 +2895,27 @@ const ACOES = {
   exportarJSON: () => { db.local.ultima_copia = hoje(); db.local.lembrar_copia_depois = null; guardar(); descarregar(`gestao-formacao-copia-${hoje()}.json`, JSON.stringify(db, null, 2), 'application/json'); render(); aviso('Cópia descarregada. Guarda-a fora deste computador (email, Drive, pen).'); },
   exportarICS: () => { const ss = sessoesVisiveis().filter(s => ui.calProvisorias || !s.provisoria); descarregar(`formacoes-${hoje()}.ics`, gerarICS(ss), 'text/calendar;charset=utf-8'); aviso(`${ss.length} sessões exportadas para .ics`); },
   exportarCSV: () => { descarregar(`recibos-${hoje()}.csv`, gerarCSVRecibos(), 'text/csv;charset=utf-8'); aviso('Recibos exportados'); },
-  reporExemplo: () => confirmar('Repor dados de exemplo', 'Isto substitui todos os teus dados pelos dados de exemplo. Exporta uma cópia antes se quiseres guardar o que tens.', 'Repor', () => { db = dadosExemplo(); aviso('Dados de exemplo repostos'); }),
+  sair: () => {
+    const fora = () => { ir('#/painel'); sb.auth.signOut(); };
+    if (porGravar() || sincronizacao) confirmar('Sair da conta', 'Há alterações que ainda não foram gravadas. Se saíres agora, perdes essas alterações.', 'Sair na mesma', fora);
+    else fora();
+  },
+  esqueciPalavra: async () => {
+    const inp = document.querySelector('form[data-conta="entrar"] input[name="email"]'), email = inp ? inp.value.trim() : '';
+    if (!email) { aviso('Escreve primeiro o teu email'); inp && inp.focus(); return; }
+    ui.emailEntrar = email;
+    const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+    ui.msgEntrar = error ? erroDeEntrada(error) : 'Se esse email tiver conta, vais receber uma mensagem com um link para escolheres uma nova palavra-passe.';
+    render();
+  },
+  tentarGravar: () => sincronizar(),
+  recarregarPagina: () => location.reload(),
+  reporExemplo: () => REMOTO || confirmar('Repor dados de exemplo', 'Isto substitui todos os teus dados pelos dados de exemplo. Exporta uma cópia antes se quiseres guardar o que tens.', 'Repor', () => { db = dadosExemplo(); aviso('Dados de exemplo repostos'); }),
   apagarTudo: () => confirmar('Apagar todos os dados', 'Ficas com a app vazia, só com os teus dados de perfil. Exporta uma cópia antes se quiseres guardar o que tens.', 'Apagar tudo', () => { const perfil = db.perfil, local = db.local; db = normalizar({ perfil, local }); aviso('Dados apagados'); setTimeout(() => ir('#/painel')); })
 };
 
 const MUDANCAS = {
-  estadoFormacao: el => { const f = form(el.dataset.id); const ant = f.estado; f.estado = el.value; f.atualizado_em = agoraLocal(); registar(`Estado: ${ESTADOS_FORM.find(x => x[0] === ant)[1]} para ${ESTADOS_FORM.find(x => x[0] === f.estado)[1]}`, f.id); guardar(); render(); aviso('Estado atualizado'); },
+  estadoFormacao: el => { const f = form(el.dataset.id); const ant = f.estado; f.estado = el.value; f.atualizado_em = agoraLocal(); if (!REMOTO) registar(`Estado: ${ESTADOS_FORM.find(x => x[0] === ant)[1]} para ${ESTADOS_FORM.find(x => x[0] === f.estado)[1]}`, f.id); guardar(); render(); aviso('Estado atualizado'); },
   estadoSessao: el => { const s = db.sessoes.find(x => x.id === el.dataset.id); s.estado = el.value; registar(`Sessão de ${fmtData(s.data)}: ${el.options[el.selectedIndex].text.toLowerCase()}`, s.formacao_id); guardar(); render(); },
   sumario: el => { const s = db.sessoes.find(x => x.id === el.dataset.id); s.sumario_entregue = el.checked; if (el.checked) registar(`Sumário de ${fmtData(s.data)} entregue`, s.formacao_id); guardar(); render(); },
   checklist: el => {
@@ -2506,7 +2938,10 @@ const MUDANCAS = {
     leitor.onload = () => {
       let o; try { o = JSON.parse(leitor.result); } catch (e) { aviso('O ficheiro não é um JSON válido'); return; }
       if (o && Array.isArray(o.formacoes) && Array.isArray(o.sessoes)) {
-        confirmar('Importar cópia', `Substituir todos os dados atuais pela cópia "${fich.name}"?`, 'Substituir', () => { db = normalizar(o); aviso('Cópia importada'); });
+        confirmar('Importar cópia', REMOTO ? `Substituir todos os dados da tua conta pela cópia "${fich.name}"? O que lá está agora é apagado.` : `Substituir todos os dados atuais pela cópia "${fich.name}"?`, 'Substituir', () => {
+          if (REMOTO) { const local = db.local; db = normalizar(idsParaUuid(o)); db.local = local; modoImportacao = true; } else db = normalizar(o);
+          aviso('Cópia importada');
+        });
       } else {
         const n = importarPedidosJSON(leitor.result);
         if (n) { guardar(); aviso(`${n} ${n === 1 ? 'pedido importado' : 'pedidos importados'}`); ir('#/entrada'); }
@@ -2579,10 +3014,44 @@ document.addEventListener('submit', e => {
   if (r && r.ir) ir(r.ir); else render();
 });
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); document.getElementById('conteudo').focus({ preventScroll: true }); });
-window.addEventListener('storage', e => { if (e.key === CHAVE && e.newValue) { try { db = normalizar(JSON.parse(e.newValue)); render(); } catch (err) { /* ignorar */ } } });
+document.addEventListener('submit', async e => {   // entrar na conta e mudar a palavra-passe
+  const f = e.target.closest('form[data-conta]');
+  if (!f) return;
+  e.preventDefault();
+  const d = Object.fromEntries(new FormData(f)), erroEl = f.querySelector('.erro-form'), botao = f.querySelector('[type=submit]');
+  const erro = m => { erroEl.textContent = m; erroEl.hidden = false; botao.disabled = false; };
+  botao.disabled = true;
+  if (f.dataset.conta === 'entrar') {
+    const email = String(d.email || '').trim();
+    ui.emailEntrar = email; ui.msgEntrar = '';
+    if (!email || !d.palavra) return erro('Escreve o email e a palavra-passe.');
+    const { error } = await sb.auth.signInWithPassword({ email, password: d.palavra });
+    if (error) return erro(erroDeEntrada(error));
+  } else {
+    if (String(d.palavra || '').length < 8) return erro('A palavra-passe tem de ter pelo menos 8 carateres.');
+    const { error } = await sb.auth.updateUser({ password: d.palavra });
+    if (error) return erro(erroDeEntrada(error));
+    ui.novaPalavra = false; history.replaceState(null, '', location.pathname + '#/painel');
+    aviso('Palavra-passe guardada'); render();
+  }
+});
+window.addEventListener('storage', e => { if (!REMOTO && e.key === CHAVE && e.newValue) { try { db = normalizar(JSON.parse(e.newValue)); render(); } catch (err) { /* ignorar */ } } });
 
-carregar();
-render();
+// Instalar no telemóvel (só quando a app está publicada num endereço web)
+if (/^https?:$/.test(location.protocol)) {
+  const m = document.createElement('link'); m.rel = 'manifest'; m.href = 'manifest.webmanifest'; document.head.appendChild(m);
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+
+if (REMOTO) {
+  iniciarRemoto();
+  window.addEventListener('online', () => { if (sessao && db) { if (porGravar()) sincronizar(); pedirRecarga(); } });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && sessao && db) pedirRecarga(); });
+  window.addEventListener('beforeunload', e => { if (sessao && db && (sincronizacao || porGravar())) { e.preventDefault(); e.returnValue = ''; } });
+} else {
+  carregar();
+  render();
+}
 </script>
 </body>
 </html>
