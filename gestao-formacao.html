@@ -262,6 +262,22 @@ main:focus,main:focus-visible{outline:none}
 .numeros dd{margin:2px 0 0;font-family:var(--f-tit);font-size:23px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 .numeros dd.mau{color:var(--critico)}
 .numeros dd small{display:block;font:500 13px var(--f-ui);color:var(--ink-3);letter-spacing:0}
+.din-total{margin-bottom:12px}
+.din-rot{margin:0;font-size:13px;font-weight:600;color:var(--ink-3)}
+.din-valor{margin:2px 0 0;font-family:var(--f-tit);font-size:34px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1}
+.din-nota{margin:6px 0 0;font-size:13px;color:var(--ink-3)}
+.din-sub{margin:20px 0 10px;font-size:15px}
+.previsao{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.previsao li{display:grid;grid-template-columns:minmax(0,6.5em) minmax(0,1fr) auto;gap:10px;align-items:center}
+.prev-mes{font-weight:600;font-size:14px;line-height:1.2}
+.prev-mes small{display:block;font-weight:500;font-size:12px;color:var(--ink-3)}
+.prev-barra{display:flex;height:10px;border-radius:5px;background:var(--line);overflow:hidden}
+.prev-barra i{display:block;height:100%;background:var(--pen)}
+.prev-barra i.prov{background:repeating-linear-gradient(90deg,var(--pen) 0 4px,transparent 4px 7px)}
+.prev-valor{text-align:right;font-family:var(--f-tit);font-weight:700;font-variant-numeric:tabular-nums;font-size:16px;line-height:1.2}
+.prev-valor small{display:block;font:500 12px var(--f-ui);color:var(--ink-3)}
+.prev-total{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin:12px 0 0;padding-top:10px;border-top:1px solid var(--line);font-size:14px;font-weight:600}
+.prev-total strong{font-family:var(--f-tit);font-size:20px;font-variant-numeric:tabular-nums}
 .prox{list-style:none;margin:0;padding:0}
 .prox li + li{border-top:1px solid var(--line)}
 .prox a{display:block;padding:12px 4px 12px 14px;position:relative;text-decoration:none;color:var(--ink)}
@@ -1515,7 +1531,33 @@ function financas(ano) {
     if (st === 'em_atraso') { emAtraso += c.liquido; nAtraso++; }
   }
   for (const f of db.formacoes) if (f.estado === 'confirmada') porFaturar += resumo(f).porFaturar;
-  return { recebidoAno, aReceber, emAtraso, nAtraso, porFaturar, faturadoAno };
+  // Por receber: tudo o que já foi dado e ainda não foi pago, com ou sem recibo.
+  // As horas sem recibo entram pelo valor líquido estimado com o IVA e a retenção do perfil.
+  const porReceber = arred(aReceber + liquidoEstimado(porFaturar));
+  return { recebidoAno, aReceber, emAtraso, nAtraso, porFaturar, faturadoAno, porReceber };
+}
+// O que fica de um valor bruto depois de IVA e retenção, com as taxas do perfil
+function liquidoEstimado(bruto) {
+  const p = db.perfil, iva = p.iva_regime === 'taxa' ? Number(p.iva_taxa) || 0 : 0, ret = Number(p.retencao_taxa) || 0;
+  return arred(bruto + arred(bruto * iva / 100) - arred(bruto * ret / 100));
+}
+// Valor das sessões marcadas e ainda não dadas, mês a mês, a começar no mês atual (= v_previsao_mensal)
+function previsaoMeses(n = 4) {
+  const h = hoje();
+  let ano = Number(h.slice(0, 4)), mes = Number(h.slice(5, 7));
+  const meses = [];
+  for (let i = 0; i < n; i++) {
+    meses.push({ chave: `${ano}-${pad(mes)}`, ano, mes, horas: 0, valor: 0, horasProv: 0, valorProv: 0 });
+    if (++mes > 12) { mes = 1; ano++; }
+  }
+  for (const s of db.sessoes) {
+    if (s.estado === 'cancelada' || s.formador || sessaoDada(s)) continue;
+    const m = meses.find(x => s.data.startsWith(x.chave)), f = m && form(s.formacao_id);
+    if (!f || !['pedido', 'proposta', 'confirmada'].includes(f.estado)) continue;
+    const hs = horasSessao(s), v = hs * (Number(f.valor_hora) || 0);
+    if (f.estado === 'confirmada') { m.horas += hs; m.valor += v; } else { m.horasProv += hs; m.valorProv += v; }
+  }
+  return meses.map(m => ({ ...m, horas: arred(m.horas), valor: arred(m.valor), horasProv: arred(m.horasProv), valorProv: arred(m.valorProv) }));
 }
 
 function sugerirFormacao(p) {
@@ -1970,7 +2012,7 @@ function quadroHtml(novos, al, fin) {
   const numeros = [
     novos.length ? `<li><a href="#/entrada"><strong>${novos.length}</strong><span>${novos.length === 1 ? 'pedido por rever' : 'pedidos por rever'}</span></a></li>` : '',
     `<li><a href="#t-tratar" data-acao="irTratar" class="${urgentes ? 'ha-urgentes' : ''}"><strong>${urgentes || al.length}</strong><span>${urgentes ? (urgentes === 1 ? 'aviso urgente' : 'avisos urgentes') : (al.length === 1 ? 'coisa por tratar' : 'coisas por tratar')}</span></a></li>`,
-    `<li><a href="#/dinheiro"><strong>${esc(EUR0.format(fin.aReceber))}</strong><span>${fin.emAtraso > 0 ? `a receber, ${esc(EUR0.format(fin.emAtraso))} em atraso` : 'a receber'}</span></a></li>`
+    `<li><a href="#/dinheiro"><strong>${esc(EUR0.format(fin.porReceber))}</strong><span>${fin.emAtraso > 0 ? `por receber, ${esc(EUR0.format(fin.emAtraso))} em atraso` : 'por receber'}</span></a></li>`
   ].join('');
   return `<section class="quadro" aria-labelledby="t-ola">
     <div class="quadro-topo">
@@ -2004,12 +2046,15 @@ function vPainel() {
     <div class="coluna">
       <section class="bloco" aria-labelledby="t-din">
         <div class="bloco-cab"><h2 id="t-din">Dinheiro</h2><a class="btn btn-peq" href="#/dinheiro">Ver tudo</a></div>
+        <div class="din-total"><p class="din-rot">Por receber</p><p class="din-valor">${euro(fin.porReceber)}</p><p class="din-nota">Formação já dada que ainda não te pagaram, com e sem recibo.</p></div>
         <dl class="numeros">
-          <div><dt>A receber</dt><dd>${euro(fin.aReceber)}</dd></div>
+          <div><dt>Recibos passados</dt><dd>${euro(fin.aReceber)}<small>à espera de pagamento</small></dd></div>
+          <div><dt>Por faturar</dt><dd>${euro(fin.porFaturar)}<small>horas dadas sem recibo</small></dd></div>
           <div><dt>Em atraso</dt><dd class="${fin.emAtraso > 0 ? 'mau' : ''}">${euro(fin.emAtraso)}${fin.nAtraso ? `<small>${fin.nAtraso} ${fin.nAtraso === 1 ? 'recibo' : 'recibos'}</small>` : ''}</dd></div>
-          <div><dt>Por faturar</dt><dd>${euro(fin.porFaturar)}<small>horas já dadas</small></dd></div>
           <div><dt>Recebido em ${new Date().getFullYear()}</dt><dd>${euro(fin.recebidoAno)}</dd></div>
         </dl>
+        <h3 class="din-sub" id="t-prev">Previsto nos próximos meses</h3>
+        ${previsaoHtml()}
       </section>
       <section class="bloco" aria-labelledby="t-prox">
         <div class="bloco-cab"><h2 id="t-prox">Formações em curso e a seguir</h2></div>
@@ -2020,6 +2065,23 @@ function vPainel() {
       </section>
     </div>
   </div>`;
+}
+
+// Quanto está marcado para os próximos meses (valor bruto das sessões ainda por dar)
+function previsaoHtml() {
+  const ms = previsaoMeses(4), atual = hoje().slice(0, 7), anoAtual = Number(atual.slice(0, 4));
+  const total = soma(ms, m => m.valor), prov = soma(ms, m => m.valorProv);
+  const porMarcar = arred(soma(db.formacoes.filter(f => f.estado === 'confirmada'), f => Math.max(0, resumo(f).faltaAgendar) * (Number(f.valor_hora) || 0)));
+  if (!total && !prov && !porMarcar) return '<p class="vazio-txt">Sem sessões marcadas nos próximos meses.</p>';
+  const max = Math.max(1, ...ms.map(m => m.valor + m.valorProv));
+  const largura = v => `${(v / max * 100).toFixed(1)}%`;
+  return `<ul class="previsao" aria-labelledby="t-prev">${ms.map(m => `<li>
+      <span class="prev-mes">${cap(MESES[m.mes - 1])}${m.ano !== anoAtual ? ` ${m.ano}` : ''}${m.chave === atual ? '<small>o que falta</small>' : ''}</span>
+      <span class="prev-barra" aria-hidden="true"><i style="width:${largura(m.valor)}"></i>${m.valorProv ? `<i class="prov" style="width:${largura(m.valorProv)}"></i>` : ''}</span>
+      <span class="prev-valor">${euro(m.valor)}<small>${horasTxt(m.horas)}${m.valorProv ? `, mais ${euro(m.valorProv)} em propostas` : ''}</small></span></li>`).join('')}</ul>
+    <p class="prev-total"><span>Total dos próximos 4 meses</span><strong>${euro(total)}</strong></p>
+    ${porMarcar > 0 ? `<p class="din-nota">Mais ${euro(porMarcar)} em horas de formações confirmadas que ainda não têm data.</p>` : ''}
+    <p class="din-nota">Valores brutos das sessões marcadas, antes de IVA e retenção.</p>`;
 }
 
 function semanaHtml() {
@@ -2421,10 +2483,10 @@ function vDinheiro() {
   return `<header class="cab-pagina"><div><h1>Dinheiro</h1><p class="sub">Valores brutos das horas e líquidos dos recibos (depois de IVA e retenção).</p></div>
     <div class="cab-acoes"><label class="sr-only" for="ano">Ano</label><select id="ano" class="sel-peq" style="padding:9px 10px;font-size:14px" data-mudar="ano">${anos.map(a => `<option ${a === ano ? 'selected' : ''}>${a}</option>`).join('')}</select><button class="btn" data-acao="exportarCSV">${ic('descarregar')} Exportar recibos (.csv)</button></div></header>
     <dl class="tiles">
-      <div class="tile"><dt>Recebido em ${ano}</dt><dd>${euro(fin.recebidoAno)}</dd></div>
-      <div class="tile"><dt>A receber</dt><dd>${euro(fin.aReceber)}</dd><span class="tile-nota">recibos emitidos por pagar</span></div>
+      <div class="tile"><dt>Por receber</dt><dd>${euro(fin.porReceber)}</dd><span class="tile-nota">${euro(fin.aReceber)} em recibos passados, o resto por faturar</span></div>
       <div class="tile ${fin.emAtraso > 0 ? 'mau' : ''}"><dt>Em atraso</dt><dd>${euro(fin.emAtraso)}</dd><span class="tile-nota">${fin.nAtraso} ${fin.nAtraso === 1 ? 'recibo' : 'recibos'}</span></div>
       <div class="tile"><dt>Por faturar</dt><dd>${euro(fin.porFaturar)}</dd><span class="tile-nota">horas dadas sem recibo</span></div>
+      <div class="tile"><dt>Recebido em ${ano}</dt><dd>${euro(fin.recebidoAno)}</dd></div>
     </dl>
     <section class="bloco" aria-labelledby="t-graf"><div class="bloco-cab"><h2 id="t-graf">Valor das sessões por mês, ${ano}</h2></div>${graficoHtml(ano)}</section>
     <section class="bloco" aria-labelledby="t-rec"><div class="bloco-cab"><h2 id="t-rec">Recibos</h2><div class="segmentos" role="group" aria-label="Filtrar recibos">${FILTROS_REC.map(([k, t]) => `<button aria-pressed="${ui.filtroRecibos === k}" data-acao="filtroRecibos" data-f="${k}">${t}</button>`).join('')}</div></div>
